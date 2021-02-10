@@ -84,7 +84,9 @@ def match_instance_to_data(instance, data):
 
     if isinstance(data, DenseData):
         if instance.group_display_values is None:
-            instance.group_display_values = [instance.x[0, group[0]] if len(group) == 1 else "" for group in data.groups]
+            # TODO: find out what these do, consider taking average over timesteps
+            instance.group_display_values = [(instance.x[0, group[0]] if len(data.data.shape) == 2 else instance.x[0, 0, group[0]])
+                                             if len(group) == 1 else "" for group in data.groups]
         assert len(instance.group_display_values) == len(data.groups)
         instance.groups = data.groups
 
@@ -148,11 +150,12 @@ class DenseData(Data):
         l = sum(len(g) for g in self.groups)
         num_samples = data.shape[0]
         t = False
-        if l != data.shape[1]:
+        # can't apply definition of transposed to 3D data
+        if l != data.shape[1] and len(data.shape) != 3:
             t = True
             num_samples = data.shape[1]
 
-        valid = (not t and l == data.shape[1]) or (t and l == data.shape[0])
+        valid = (not t and l == (data.shape[1] if len(data.shape) == 2 else data.shape[2])) or (t and l == data.shape[0])
         assert valid, "# of names must match data matrix!"
 
         self.weights = args[1] if len(args) > 1 else np.ones(num_samples)
@@ -185,7 +188,10 @@ def convert_to_data(val, keep_index=False):
     if isinstance(val, Data):
         return val
     elif type(val) == np.ndarray:
-        return DenseData(val, [str(i) for i in range(val.shape[1])])
+        if len(val.shape) == 2:
+            return DenseData(val, [str(i) for i in range(val.shape[1])])
+        elif len(val.shape) == 3:
+            return DenseData(val, [str(i) for i in range(val.shape[2])])
     elif str(type(val)).endswith("'pandas.core.series.Series'>"):
         return DenseData(val.values.reshape((1,len(val))), list(val.index))
     elif str(type(val)).endswith("'pandas.core.frame.DataFrame'>"):
