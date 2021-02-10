@@ -76,7 +76,7 @@ class Kernel(Explainer):
 
         # init our parameters
         self.N = self.data.data.shape[0]
-        self.P = self.data.data.shape[1]
+        self.P = self.data.data.shape[1] if len(self.data.data.shape) == 2 else self.data.data.shape[2]
         self.linkfv = np.vectorize(self.link.f)
         self.nsamplesAdded = 0
         self.nsamplesRun = 0
@@ -145,7 +145,7 @@ class Kernel(Explainer):
         if sp.sparse.issparse(X) and not sp.sparse.isspmatrix_lil(X):
             X = X.tolil()
         assert x_type.endswith(arr_type) or sp.sparse.isspmatrix_lil(X), "Unknown instance type: " + x_type
-        assert len(X.shape) == 1 or len(X.shape) == 2, "Instance must have 1 or 2 dimensions!"
+        assert len(X.shape) == 1 or len(X.shape) == 2 or len(X.shape) == 3, "Instance must have 1 or 2 dimensions!"
 
         # single instance
         if len(X.shape) == 1:
@@ -170,6 +170,29 @@ class Kernel(Explainer):
 
         # explain the whole dataset
         elif len(X.shape) == 2:
+            explanations = []
+            for i in tqdm(range(X.shape[0]), disable=kwargs.get("silent", False)):
+                data = X[i:i + 1, :]
+                if self.keep_index:
+                    data = convert_to_instance_with_index(data, column_name, index_value[i:i + 1], index_name)
+                explanations.append(self.explain(data, **kwargs))
+
+            # vector-output
+            s = explanations[0].shape
+            if len(s) == 2:
+                outs = [np.zeros((X.shape[0], s[0])) for j in range(s[1])]
+                for i in range(X.shape[0]):
+                    for j in range(s[1]):
+                        outs[j][i] = explanations[i][:, j]
+                return outs
+
+            # single-output
+            else:
+                out = np.zeros((X.shape[0], s[0]))
+                for i in range(X.shape[0]):
+                    out[i] = explanations[i]
+                return out
+        elif len(X.shape) == 3:
             explanations = []
             for i in tqdm(range(X.shape[0]), disable=kwargs.get("silent", False)):
                 data = X[i:i + 1, :]
@@ -318,7 +341,7 @@ class Kernel(Explainer):
             log.debug("samples_left = {0}".format(samples_left))
             if num_full_subsets != num_subset_sizes:
                 remaining_weight_vector = copy.copy(weight_vector)
-                remaining_weight_vector[:num_paired_subset_sizes] /= 2 # because we draw two samples each below
+                remaining_weight_vector[:num_paired_subset_sizes] /= 2  # because we draw two samples each below
                 remaining_weight_vector = remaining_weight_vector[num_full_subsets:]
                 remaining_weight_vector /= np.sum(remaining_weight_vector)
                 log.info("remaining_weight_vector = {0}".format(remaining_weight_vector))
@@ -392,13 +415,16 @@ class Kernel(Explainer):
             varying = np.zeros(self.data.groups_size)
             for i in range(0, self.data.groups_size):
                 inds = self.data.groups[i]
-                x_group = x[0, inds]
+                x_group = x[0, inds] if len(x.shape) == 2 else x[0, 0, inds]
                 if sp.sparse.issparse(x_group):
                     if all(j not in x.nonzero()[1] for j in inds):
                         varying[i] = False
                         continue
                     x_group = x_group.todense()
-                num_mismatches = np.sum(np.frompyfunc(self.not_equal, 2, 1)(x_group, self.data.data[:, inds]))
+                if len(x.shape) == 2:
+                    num_mismatches = np.sum(np.frompyfunc(self.not_equal, 2, 1)(x_group, self.data.data[:, inds]))
+                elif len(x.shape) == 3:
+                    num_mismatches = np.sum(np.frompyfunc(self.not_equal, 2, 1)(x_group, self.data.data[:, :, inds]))
                 varying[i] = num_mismatches > 0
             varying_indices = np.nonzero(varying)[0]
             return varying_indices
@@ -454,7 +480,10 @@ class Kernel(Explainer):
                 new_indices = np.tile(indices, self.nsamples)
                 self.synth_data = sp.sparse.csr_matrix((new_data, new_indices, new_indptr), shape=shape).tolil()
         else:
-            self.synth_data = np.tile(self.data.data, (self.nsamples, 1))
+            if len(self.data.data.shape) == 2:
+                self.synth_data = np.tile(self.data.data, (self.nsamples, 1))
+            elif len(self.data.data.shape) == 3:
+                self.synth_data = np.tile(self.data.data, (self.nsamples, 1, 1))
 
         self.maskMatrix = np.zeros((self.nsamples, self.M))
         self.kernelWeights = np.zeros(self.nsamples)
@@ -482,12 +511,18 @@ class Kernel(Explainer):
                     self.synth_data[offset:offset+self.N, group] = x[0, group]
             else:
                 # further performance optimization in case each group has a single feature
-                evaluation_data = x[0, groups]
+                if len(x.shape) == 2:
+                    evaluation_data = x[0, groups]
+                elif len(x.shape) == 3:
+                    evaluation_data = x[0, :, groups].T
                 # In edge case where background is all dense but evaluation data
                 # is all sparse, make evaluation data dense
                 if sp.sparse.issparse(x) and not sp.sparse.issparse(self.synth_data):
                     evaluation_data = evaluation_data.toarray()
-                self.synth_data[offset:offset+self.N, groups] = evaluation_data
+                if len(x.shape) == 2:
+                    self.synth_data[offset:offset+self.N, groups] = evaluation_data
+                elif len(x.shape) == 3:
+                    self.synth_data[offset:offset + self.N, :, groups] = evaluation_data
         self.maskMatrix[self.nsamplesAdded, :] = m
         self.kernelWeights[self.nsamplesAdded] = w
         self.nsamplesAdded += 1
